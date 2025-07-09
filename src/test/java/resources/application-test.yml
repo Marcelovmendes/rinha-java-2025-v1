@@ -1,0 +1,5 @@
+spring:
+    application:
+        name: rinha-v1-test
+    autoconfigure:
+        exclude: org.redisson.spring.starter.RedissonAutoConfiguration,org.redisson.spring.starter.RedissonAutoConfigurationV2
