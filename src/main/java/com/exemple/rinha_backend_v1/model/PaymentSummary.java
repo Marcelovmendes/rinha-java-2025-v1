@@ -12,7 +12,6 @@ public class PaymentSummary {
     @JsonProperty("fallback")
     private ProcessorSummary fallbackProcessor;
 
-
     public static class ProcessorSummary {
         private long totalRequests;
         private BigDecimal totalAmount;
