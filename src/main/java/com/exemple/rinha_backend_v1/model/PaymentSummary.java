@@ -18,7 +18,7 @@ public class PaymentSummary {
     }
 
     public static class ProcessorSummary {
-        private final long totalRequests;
+        private long totalRequests;
         private final BigDecimal totalAmount;
 
         public ProcessorSummary() {
@@ -28,15 +28,30 @@ public class PaymentSummary {
         public long getTotalRequests() {
             return totalRequests;
         }
+        public void setTotalRequests(long totalRequests) {
+            this.totalRequests = totalRequests;
+        }
         public BigDecimal getTotalAmount() {
             return totalAmount;
         }
+        public void setTotalAmount(BigDecimal amount) {
+            if (amount != null) {
+                this.totalAmount.add(amount);
+            }
+        }
+
     }
 
     public ProcessorSummary getDefaultProcessor() {
         return defaultProcessor;
     }
+    public void setDefaultProcessor(ProcessorSummary defaultProcessor) {
+        this.defaultProcessor = defaultProcessor;
+    }
     public ProcessorSummary getFallbackProcessor() {
         return fallbackProcessor;
+    }
+    public void setFallbackProcessor(ProcessorSummary fallbackProcessor) {
+        this.fallbackProcessor = fallbackProcessor;
     }
 }
