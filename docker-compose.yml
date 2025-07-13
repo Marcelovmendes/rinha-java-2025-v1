@@ -32,8 +32,8 @@ services:
     image: marcelocortess/rinha-backend-2025:latest
     hostname: api1
     environment:
-      - PAYMENT_PROCESSOR_DEFAULT=http://payment-processor-default:8080
-      - PAYMENT_PROCESSOR_FALLBACK=http://payment-processor-fallback:8080
+      - PAYMENT_PROCESSOR_URL_DEFAULT=http://payment-processor-default:8080
+      - PAYMENT_PROCESSOR_URL_FALLBACK=http://payment-processor-fallback:8080
       - SPRING_REDIS_HOST=redis
       - SERVER_PORT=8080
     depends_on:

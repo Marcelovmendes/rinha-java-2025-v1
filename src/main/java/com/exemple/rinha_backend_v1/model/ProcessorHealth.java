@@ -8,6 +8,9 @@ public class ProcessorHealth {
     public boolean isFailing() {
         return failing;
     }
+    public void faling(boolean failing) {
+        this.failing = failing;
+    }
     public Integer getMinResponseTime() {
         return minResponseTime;
     }
