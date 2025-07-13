@@ -22,9 +22,14 @@ public class HealthCheckScheduler {
         checkHealth();
     }
 
-    @Scheduled(fixedDelay = 4000) //a cada 4s
+    @Scheduled(fixedDelay = 5000)
     public void checkHealth() {
-        paymentService.updateHealthCache(ProcessorType.DEFAULT);
-        paymentService.updateHealthCache(ProcessorType.FALLBACK);
+        try {
+            paymentService.updateHealthCache(ProcessorType.DEFAULT);
+            Thread.sleep(100);
+            paymentService.updateHealthCache(ProcessorType.FALLBACK);
+        } catch (Exception e) {
+            System.err.println("Error during health check: " + e.getMessage());
+        }
     }
 }

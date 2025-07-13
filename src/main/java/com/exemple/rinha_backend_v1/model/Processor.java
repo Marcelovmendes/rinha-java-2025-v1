@@ -31,6 +31,9 @@ public class Processor {
         public void computeTotalRequests() {
             this.totalRequests += 1;
         }
+        public void setTotalRequests(long totalRequests) {
+            this.totalRequests = totalRequests;
+        }
         public BigDecimal getTotalAmount() {
             return totalAmount;
         }
