@@ -21,16 +21,18 @@ public class RedissonConfig {
         Config config = new Config();
         config.useSingleServer()
                 .setAddress("redis://" + redisHost + ":" + redisPort)
-                .setConnectionPoolSize(64)
-                .setConnectionMinimumIdleSize(10)
-                .setIdleConnectionTimeout(3000)
-                .setTimeout(3000)
-                .setRetryAttempts(3)
-                .setRetryInterval(1500)
-                .setKeepAlive(true);
+                .setConnectionPoolSize(8)
+                .setConnectionMinimumIdleSize(2)
+                .setIdleConnectionTimeout(5000)
+                .setTimeout(1000)
+                .setRetryAttempts(2)
+                .setRetryInterval(500)
+                .setKeepAlive(true)
+                .setTcpNoDelay(true)
+                .setPingConnectionInterval(30000);
 
-        config.setThreads(16);
-        config.setNettyThreads(36);
+        config.setThreads(4);
+        config.setNettyThreads(4);
 
         return Redisson.create(config);
     }

@@ -13,9 +13,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
-import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -28,6 +28,9 @@ public class PaymentService {
     private static final String HEALTH_KEY = "processor:health:";
     private static final String PAYMENT_QUEUE = "payment:queue";
     private static final String PROCESSED_PAYMENTS = "payments:processed:";
+    private static final String COUNTER_REQUESTS = "counter:requests:";
+    private static final String COUNTER_AMOUNT = "counter:amount:";
+    private static final String COUNTER_FEE = "counter:fee:";
 
     private final RedissonClient redisson;
     private final RestTemplate restTemplate;
@@ -45,8 +48,61 @@ public class PaymentService {
         this.summaryCache = redisson.getBucket("summary:cache");
         startPaymentProcessor();
     }
+
+    public void processPayment(PaymentRequest request) {
+        try {
+            RSet<String> processedIds = redisson.getSet("processed:ids");
+            String idStr = request.getCorrelationId().toString();
+
+            if (!processedIds.add(idStr)) {
+                log.debug("Payment already processed: {}", request.getCorrelationId());
+                return;
+            }
+
+            if (processedIds.size() > 5000) {
+                processedIds.remove(processedIds.iterator().next());
+            }
+
+            RQueue<PaymentQueueItem> queue = redisson.getQueue(PAYMENT_QUEUE);
+            PaymentQueueItem item = new PaymentQueueItem(
+                    request.getCorrelationId(),
+                    request.getAmount(),
+                    Instant.now()
+            );
+
+           Boolean added = queue.offer(item);
+
+           if (!added) {
+                log.error("Failed to add payment to queue: {}", request.getCorrelationId());
+                processedIds.remove(idStr);
+                throw new RuntimeException("Payment queue is full");
+            }
+            log.debug("Payment queued: {}", request.getCorrelationId());
+
+        } catch (Exception e) {
+            log.error("Error processing payment: {}", e.getMessage());
+            throw new RuntimeException("Payment processing failed", e);
+        }
+    }
+    private ProcessorType selectProcessor() {
+        try {
+            RBucket<ProcessorHealth> defaultHealth = redisson.getBucket(HEALTH_KEY + ProcessorType.DEFAULT.getName());
+            ProcessorHealth health = defaultHealth.get();
+
+            if (health != null && health.isFailing()) {
+                log.debug("Default processor failing, using fallback");
+                return ProcessorType.FALLBACK;
+            }
+
+            return ProcessorType.DEFAULT;
+
+        } catch (Exception e) {
+            log.error("Error selecting processor: {}", e.getMessage());
+            return ProcessorType.DEFAULT;
+        }
+    }
     private void startPaymentProcessor() {
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 2; i++) {
             final int workerId = i;
             Thread.startVirtualThread(() -> {
                 RBlockingQueue<PaymentQueueItem> queue = redisson.getBlockingQueue(PAYMENT_QUEUE);
@@ -56,7 +112,7 @@ public class PaymentService {
                     try {
                         PaymentQueueItem item = queue.poll(1, TimeUnit.SECONDS);
                         if (item != null) {
-                            log.debug("Worker {} processing payment: {}", workerId, item.getCorrelationId());
+                            log.debug("Worker {} processing payment: {}", workerId, item.correlationId());
                             processPaymentAsync(item);
                         }
                     } catch (InterruptedException e) {
@@ -76,93 +132,34 @@ public class PaymentService {
             boolean success = sendToProcessor(item, selectedProcessor);
 
             if (!success && selectedProcessor == ProcessorType.DEFAULT) {
-                log.warn("Default processor failed for {}, trying fallback", item.getCorrelationId());
+                log.warn("Default processor failed for {}, trying fallback", item.correlationId());
                 success = sendToProcessor(item, ProcessorType.FALLBACK);
                 if (success) {
                     selectedProcessor = ProcessorType.FALLBACK;
-                    log.info("Fallback processor succeeded for {}", item.getCorrelationId());
+                    log.info("Fallback processor succeeded for {}", item.correlationId());
                 }
             }
 
             if (success) {
                 updateSummary(selectedProcessor, item);
-                log.info("Payment {} processed successfully with {}", item.getCorrelationId(), selectedProcessor.getName());
+                log.info("Payment {} processed successfully with {}", item.correlationId(), selectedProcessor.getName());
             } else {
-                log.error("FAILED TO PROCESS PAYMENT: {} - Both processors failed", item.getCorrelationId());
+                log.error("FAILED TO PROCESS PAYMENT: {} - Both processors failed", item.correlationId());
             }
 
         } catch (Exception e) {
-            log.error("Error processing payment async for {}: {}", item.getCorrelationId(), e.getMessage());
-        }
-    }
-    public void processPayment(PaymentRequest request) {
-        try {
-            RSet<String> processedIds = redisson.getSet("processed:ids");
-            if (processedIds.contains(request.getCorrelationId().toString())) {
-                log.debug("Payment already processed: {}", request.getCorrelationId());
-                return;
-            }
-
-            // Adiciona na fila para processamento assíncrono
-            RQueue<PaymentQueueItem> queue = redisson.getQueue(PAYMENT_QUEUE);
-            PaymentQueueItem item = new PaymentQueueItem(
-                    request.getCorrelationId(),
-                    request.getAmount(),
-                    Instant.now()
-            );
-
-            boolean added = queue.offer(item);
-            if (added) {
-                processedIds.add(request.getCorrelationId().toString());
-                log.debug("Payment queued successfully: {}", request.getCorrelationId());
-            }
-
-        } catch (Exception e) {
-            log.error("Error processing payment: {}", e.getMessage());
-            throw new RuntimeException("Payment processing failed", e);
-        }
-    }
-
-    private ProcessorType selectProcessor() {
-        try {
-            RBucket<ProcessorHealth> defaultHealth = redisson.getBucket(HEALTH_KEY + ProcessorType.DEFAULT.getName());
-            ProcessorHealth health = defaultHealth.get();
-
-            ProcessorType selected;
-
-            if (health == null) {
-                selected = ProcessorType.DEFAULT;
-                log.debug("No health info for default processor - using default");
-            }
-            assert health != null;
-            if (health.isFailing()) {
-                selected = ProcessorType.FALLBACK;
-                log.info("Default processor is failing, using fallback");
-            } else {
-                selected = ProcessorType.DEFAULT;
-                log.debug("Default processor healthy - using default");
-            }
-
-            // LOG ESSENCIAL PARA DEBUG
-            log.info("Selected processor {} for payment", selected.getName());
-            return selected;
-
-        } catch (Exception e) {
-            log.error("Error selecting processor: {}", e.getMessage());
-            return ProcessorType.DEFAULT;
+            log.error("Error processing payment async for {}: {}", item.correlationId(), e.getMessage());
         }
     }
     private boolean sendToProcessor(PaymentQueueItem item, ProcessorType processorType) {
         String url = processorType == ProcessorType.DEFAULT ? defaultProcessorUrl : fallbackProcessorUrl;
 
         try {
-            // CORREÇÃO: Usar UUID sem conversão para string e BigDecimal corretamente
             Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("correlationId", item.getCorrelationId()); // UUID direto
-            payload.put("amount", item.getAmount()); // BigDecimal direto
-            payload.put("requestedAt", DateTimeFormatter.ISO_INSTANT.format(item.getRequestedAt()));
+            payload.put("correlationId", item.correlationId());
+            payload.put("amount", item.amount());
+            payload.put("requestedAt", DateTimeFormatter.ISO_INSTANT.format(item.requestedAt()));
 
-            // Headers explícitos
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
 
@@ -179,89 +176,75 @@ public class PaymentService {
             boolean success = response.getStatusCode().is2xxSuccessful();
             if (success) {
                 log.info("Payment {} sent successfully to {} - Status: {}",
-                        item.getCorrelationId(), processorType.getName(), response.getStatusCode());
-            } else {
-                log.error("Payment {} failed with status {} to {}",
-                        item.getCorrelationId(), response.getStatusCode(), processorType.getName());
+                        item.correlationId(), processorType.getName(), response.getStatusCode());
             }
-
             return success;
 
         } catch (Exception e) {
             log.error("Exception sending payment {} to {}: {}",
-                    item.getCorrelationId(), processorType.getName(), e.getMessage());
+                    item.correlationId(), processorType.getName(), e.getMessage());
             return false;
         }
     }
-    private String formatTimestampForProcessor(Instant timestamp) {
-        return DateTimeFormatter.ISO_INSTANT.format(timestamp);
-    }
-
     private void updateSummary(ProcessorType processor, PaymentQueueItem item) {
         try {
-            String correlationIdStr = item.getCorrelationId().toString();
+            BigDecimal amount = item.amount();
 
-            // Armazena usando Hash para melhor performance nas consultas de summary
-            RMap<String, String> paymentData = redisson.getMap(PROCESSED_PAYMENTS + processor.getName() + ":" + correlationIdStr);
-            paymentData.put("amount", item.getAmount().toString());
-            paymentData.put("timestamp", Long.toString(item.getRequestedAt().toEpochMilli()));
-            paymentData.put("processor", processor.getName());
-
-            // Também mantém em SortedSet para queries por range de tempo
-            RScoredSortedSet<String> timeIndex = redisson.getScoredSortedSet("payments:time:" + processor.getName());
-            timeIndex.add(item.getRequestedAt().toEpochMilli(), correlationIdStr);
-
-            // Contadores atômicos para performance
-            RAtomicLong totalRequests = redisson.getAtomicLong("counter:requests:" + processor.getName());
-            RAtomicDouble totalAmount = redisson.getAtomicDouble("counter:amount:" + processor.getName());
+            RAtomicLong totalRequests = redisson.getAtomicLong(COUNTER_REQUESTS + processor.getName());
+            RAtomicDouble totalAmount = redisson.getAtomicDouble(COUNTER_AMOUNT + processor.getName());
 
             long newRequestCount = totalRequests.incrementAndGet();
-            double newAmountTotal = totalAmount.addAndGet(item.getAmount().doubleValue());
+            double newAmountTotal = totalAmount.addAndGet(item.amount().doubleValue());
+
 
             log.info("Updated summary for {}: requests={}, totalAmount={}, payment={}",
-                    processor.getName(), newRequestCount, newAmountTotal, item.getAmount());
+                    processor.getName(), newRequestCount, newAmountTotal, item.amount());
+
+            summaryCache.delete();
 
         } catch (Exception e) {
-            log.error("Error updating summary for {} payment {}: {}",
-                    processor.getName(), item.getCorrelationId(), e.getMessage());
+            log.error("Error updating summary for {}: {}", processor.getName(), e.getMessage());
         }
     }
 
+
     public Processor getSummary(Instant from, Instant to) {
         try {
-            long startTime = System.currentTimeMillis();
-
-            if (from == null && to == null) {
-                Processor cached = summaryCache.get();
-                if (cached != null) {
-                    long duration = System.currentTimeMillis() - startTime;
-                    log.info("Returned cached summary in {}ms", duration);
-                    return cached;
-                }
-            }
-
             Processor summary = new Processor();
 
-            Processor.Summary defaultSummary = getProcessorSummary(ProcessorType.DEFAULT, from, to);
-            Processor.Summary fallbackSummary = getProcessorSummary(ProcessorType.FALLBACK, from, to);
+            RAtomicLong defaultRequests = redisson.getAtomicLong(COUNTER_REQUESTS + ProcessorType.DEFAULT.getName());
+            RAtomicDouble defaultAmount = redisson.getAtomicDouble(COUNTER_AMOUNT + ProcessorType.DEFAULT.getName());
+            RAtomicDouble defaultFee = redisson.getAtomicDouble(COUNTER_FEE + ProcessorType.DEFAULT.getName());
+
+            Processor.Summary defaultSummary = new Processor.Summary();
+            long defaultReq = defaultRequests.get();
+            double defaultAmt = defaultAmount.get();
+            double defaultFeeAmt = defaultFee.get();
+
+            defaultSummary.setTotalRequests(defaultReq);
+            defaultSummary.computeTotalAmount(BigDecimal.valueOf(defaultAmt).setScale(2, RoundingMode.HALF_UP));
+
+            RAtomicLong fallbackRequests = redisson.getAtomicLong(COUNTER_REQUESTS + ProcessorType.FALLBACK.getName());
+            RAtomicDouble fallbackAmount = redisson.getAtomicDouble(COUNTER_AMOUNT + ProcessorType.FALLBACK.getName());
+            RAtomicDouble fallbackFee = redisson.getAtomicDouble(COUNTER_FEE + ProcessorType.FALLBACK.getName());
+
+            Processor.Summary fallbackSummary = new Processor.Summary();
+            long fallbackReq = fallbackRequests.get();
+            double fallbackAmt = fallbackAmount.get();
+            double fallbackFeeAmt = fallbackFee.get();
+
+            fallbackSummary.setTotalRequests(fallbackReq);
+            fallbackSummary.computeTotalAmount(BigDecimal.valueOf(fallbackAmt).setScale(2, RoundingMode.HALF_UP));
 
             summary.defaultProcessor(defaultSummary);
             summary.fallbackProcessor(fallbackSummary);
-
-            if (from == null && to == null) {
-                summaryCache.set(summary, 2, TimeUnit.SECONDS);
-            }
-
-            long elapsedTime = System.currentTimeMillis() - startTime;
-
-            log.info("Generated summary in {}ms - Default: {} requests, {} amount | Fallback: {} requests, {} amount",
-                    elapsedTime,
-                    defaultSummary.getTotalRequests(), defaultSummary.getTotalAmount(),
-                    fallbackSummary.getTotalRequests(), fallbackSummary.getTotalAmount());
+            log.debug("Summary generated - Default: {} req, {} amt, {} fee | Fallback: {} req, {} amt",
+                    defaultReq, defaultAmt, defaultFeeAmt, fallbackReq, fallbackAmt);
 
             return summary;
+
         } catch (Exception e) {
-            log.error("Error getting summary: {}", e.getMessage(), e);
+            log.error("Error generating fast summary: {}", e.getMessage());
             Processor summary = new Processor();
             summary.defaultProcessor(new Processor.Summary());
             summary.fallbackProcessor(new Processor.Summary());
@@ -269,119 +252,37 @@ public class PaymentService {
         }
     }
 
-
-    private Processor.Summary getProcessorSummary(ProcessorType processor, Instant from, Instant to) {
-        try {
-            Processor.Summary summary = new Processor.Summary();
-
-            if (from == null && to == null) {
-                // Sem filtro de tempo - usa contadores atômicos
-                RAtomicLong totalRequests = redisson.getAtomicLong("counter:requests:" + processor.getName());
-                RAtomicDouble totalAmount = redisson.getAtomicDouble("counter:amount:" + processor.getName());
-
-                long requests = totalRequests.get();
-                double amount = totalAmount.get();
-
-                summary.setTotalRequests(requests);
-                summary.computeTotalAmount(BigDecimal.valueOf(amount));
-
-                log.debug("Summary for {} (no filter): requests={}, amount={}",
-                        processor.getName(), requests, amount);
-            } else {
-                // Com filtro de tempo - usa SortedSet
-                double fromScore = from != null ? from.toEpochMilli() : Double.NEGATIVE_INFINITY;
-                double toScore = to != null ? to.toEpochMilli() : Double.POSITIVE_INFINITY;
-
-                RScoredSortedSet<String> timeIndex = redisson.getScoredSortedSet("payments:time:" + processor.getName());
-                Collection<String> correlationIds = timeIndex.valueRange(fromScore, true, toScore, true);
-
-                long count = 0;
-                BigDecimal totalAmount = BigDecimal.ZERO;
-
-                for (String correlationId : correlationIds) {
-                    RMap<String, String> paymentData = redisson.getMap(PROCESSED_PAYMENTS + processor.getName() + ":" + correlationId);
-                    String amountStr = paymentData.get("amount");
-                    if (amountStr != null) {
-                        count++;
-                        totalAmount = totalAmount.add(new BigDecimal(amountStr));
-                    }
-                }
-
-                summary.setTotalRequests(count);
-                summary.computeTotalAmount(totalAmount);
-
-                log.debug("Summary for {} (filtered): requests={}, amount={}, range=[{}, {}]",
-                        processor.getName(), count, totalAmount, from, to);
-            }
-
-            return summary;
-        } catch (Exception e) {
-            log.error("Error getting processor summary for {}: {}", processor.getName(), e.getMessage());
-            return new Processor.Summary();
-        }
-    }
-
-    private Processor.Summary processProcessorSummary(ProcessorType processor, double from, double to) {
-        RScoredSortedSet<PaymentRecord> sortedSet = redisson.getScoredSortedSet("payment:" + processor.getName());
-        Collection<PaymentRecord> paymentsInRange = sortedSet.valueRange(from, true, to, true);
-
-        Processor.Summary summary = new Processor.Summary();
-        for (PaymentRecord record : paymentsInRange) {
-            summary.computeTotalRequests();
-            summary.computeTotalAmount(record.getAmount());
-        }
-
-        return summary;
-    }
-
     public void updateHealthCache(ProcessorType processor) {
         String url = processor == ProcessorType.DEFAULT ? defaultProcessorUrl : fallbackProcessorUrl;
         RBucket<ProcessorHealth> healthBucket = redisson.getBucket(HEALTH_KEY + processor.getName());
 
         try {
+            long startTime = System.currentTimeMillis();
+
             ResponseEntity<ProcessorHealth> response = restTemplate.getForEntity(
                     url + "/payments/service-health",
                     ProcessorHealth.class
             );
 
+            long duration = System.currentTimeMillis() - startTime;
+
             ProcessorHealth health = response.getBody();
             if (health != null) {
-                healthBucket.set(health, 10, TimeUnit.SECONDS);
+                healthBucket.set(health, 8, TimeUnit.SECONDS);
 
-                // LOG ÚTIL - mostra os dados reais
-                log.info("Health check for {}: failing={}, minResponseTime={}ms",
+                log.info("Health check for {}: failing={}, minResponseTime={}ms, checkDuration={}ms",
                         processor.getName(),
                         health.isFailing(),
-                        health.getMinResponseTime());
-            } else {
-                log.warn("Health check for {} returned null body", processor.getName());
+                        health.getMinResponseTime(),
+                        duration);
             }
 
         } catch (Exception e) {
             log.error("Health check failed for {}: {}", processor.getName(), e.getMessage());
 
-            // Marcar como falhando
             ProcessorHealth health = new ProcessorHealth();
             health.failing(true);
-            healthBucket.set(health, 5, TimeUnit.SECONDS);
-
-            log.warn("Marked {} as failing due to health check failure", processor.getName());
-        }
-    }
-    public void purgePayments() {
-        try {
-            RQueue<PaymentQueueItem> queue = redisson.getQueue(PAYMENT_QUEUE);
-            queue.clear();
-
-            RScoredSortedSet<PaymentRecord> defaultSet = redisson.getScoredSortedSet("payment:" + ProcessorType.DEFAULT.getName());
-            RScoredSortedSet<PaymentRecord> fallbackSet = redisson.getScoredSortedSet("payment:" + ProcessorType.FALLBACK.getName());
-
-            defaultSet.clear();
-            fallbackSet.clear();
-
-            log.info("All payments purged from Redis");
-        } catch (Exception e) {
-            log.error("Error purging payments: {}", e.getMessage());
+            healthBucket.set(health, 3, TimeUnit.SECONDS);
         }
     }
 }

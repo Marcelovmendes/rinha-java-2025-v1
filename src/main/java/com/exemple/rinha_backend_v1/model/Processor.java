@@ -18,8 +18,12 @@ public class Processor {
     }
 
     public static class Summary {
+        @JsonProperty("total_requests")
         private long totalRequests;
+
+        @JsonProperty("total_amount")
         private BigDecimal totalAmount;
+
 
         public Summary() {
             this.totalRequests = 0L;
@@ -27,9 +31,6 @@ public class Processor {
         }
         public long getTotalRequests() {
             return totalRequests;
-        }
-        public void computeTotalRequests() {
-            this.totalRequests += 1;
         }
         public void setTotalRequests(long totalRequests) {
             this.totalRequests = totalRequests;

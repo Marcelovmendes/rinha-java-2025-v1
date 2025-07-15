@@ -46,52 +46,32 @@ public class PaymentController {
         Instant toInstant = parseTimestamp(to);
 
         try {
-            // TIMEOUT DE 2 SEGUNDOS - Se demorar mais, retorna summary básico
-            CompletableFuture<Processor> summaryFuture = CompletableFuture.supplyAsync(() ->
-                    paymentService.getSummary(fromInstant, toInstant)
-            );
-
-            Processor summary = summaryFuture.get(2, TimeUnit.SECONDS);
+            var summary = paymentService.getSummary(fromInstant, toInstant);
 
             long duration = System.currentTimeMillis() - startTime;
             log.info("Summary endpoint completed in {}ms", duration);
-
             return ResponseEntity.ok(summary);
 
         } catch (Exception e) {
-            long duration = System.currentTimeMillis() - startTime;
-            log.warn("Summary endpoint timeout/error after {}ms: {}", duration, e.getMessage());
-
-            // FALLBACK: Retorna summary básico ao invés de erro
-            Processor basicSummary = createBasicSummary();
-            return ResponseEntity.ok(basicSummary);
+            return ResponseEntity.internalServerError().build();
         }
 
     }
 
-    @PostMapping("/admin/purge-payments")
-    public ResponseEntity<Map<String, String>> purgePayments() {
-        paymentService.purgePayments();
-        Map<String, String> response = new HashMap<>();
-        response.put("message", "All payments purged.");
-        return ResponseEntity.ok(response);
-    }
+
     private Instant parseTimestamp(String timestamp) {
         if (timestamp == null || timestamp.trim().isEmpty()) {
             return null;
         }
 
         try {
-            // Primeiro tenta parse direto (caso tenha Z ou offset)
             return Instant.parse(timestamp);
         } catch (DateTimeParseException e1) {
             try {
-                // Se falhar, adiciona Z e tenta novamente (assume UTC)
                 String withZ = timestamp.endsWith("Z") ? timestamp : timestamp + "Z";
                 return Instant.parse(withZ);
             } catch (DateTimeParseException e2) {
                 try {
-                    // Último resort: tenta com .000Z se não tiver milissegundos
                     String normalized = timestamp;
                     if (!normalized.contains(".") && !normalized.endsWith("Z")) {
                         normalized = normalized + ".000Z";
@@ -100,36 +80,12 @@ public class PaymentController {
                     }
                     return Instant.parse(normalized);
                 } catch (DateTimeParseException e3) {
-                    // Se ainda falhar, log e retorna null
+
                     System.err.println("Failed to parse timestamp: " + timestamp + " - " + e3.getMessage());
                     return null;
                 }
             }
         }
     }
-    private Processor createBasicSummary() {
-        try {
-            // Simula summary básico - usar apenas dados mais simples
-            Processor summary = new Processor();
 
-            // Summary padrão vazio mas válido
-            Processor.Summary defaultSummary = new Processor.Summary();
-            defaultSummary.setTotalRequests(0L);
-            defaultSummary.computeTotalAmount(BigDecimal.ZERO);
-
-            Processor.Summary fallbackSummary = new Processor.Summary();
-            fallbackSummary.setTotalRequests(0L);
-            fallbackSummary.computeTotalAmount(BigDecimal.ZERO);
-
-            summary.defaultProcessor(defaultSummary);
-            summary.fallbackProcessor(fallbackSummary);
-
-            log.info("Returned basic summary due to timeout");
-            return summary;
-
-        } catch (Exception e) {
-            log.error("Error creating basic summary: {}", e.getMessage());
-            return new Processor(); // Summary completamente vazio
-        }
-    }
 }
