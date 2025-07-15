@@ -42,11 +42,10 @@ public class PaymentController {
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) String to) {
         long startTime = System.currentTimeMillis();
 
-        Instant fromInstant = parseTimestamp(from);
-        Instant toInstant = parseTimestamp(to);
+
 
         try {
-            var summary = paymentService.getSummary(fromInstant, toInstant);
+            var summary = paymentService.getSummary(from, to);
 
             long duration = System.currentTimeMillis() - startTime;
             log.info("Summary endpoint completed in {}ms", duration);
@@ -59,33 +58,5 @@ public class PaymentController {
     }
 
 
-    private Instant parseTimestamp(String timestamp) {
-        if (timestamp == null || timestamp.trim().isEmpty()) {
-            return null;
-        }
-
-        try {
-            return Instant.parse(timestamp);
-        } catch (DateTimeParseException e1) {
-            try {
-                String withZ = timestamp.endsWith("Z") ? timestamp : timestamp + "Z";
-                return Instant.parse(withZ);
-            } catch (DateTimeParseException e2) {
-                try {
-                    String normalized = timestamp;
-                    if (!normalized.contains(".") && !normalized.endsWith("Z")) {
-                        normalized = normalized + ".000Z";
-                    } else if (!normalized.endsWith("Z")) {
-                        normalized = normalized + "Z";
-                    }
-                    return Instant.parse(normalized);
-                } catch (DateTimeParseException e3) {
-
-                    System.err.println("Failed to parse timestamp: " + timestamp + " - " + e3.getMessage());
-                    return null;
-                }
-            }
-        }
-    }
 
 }

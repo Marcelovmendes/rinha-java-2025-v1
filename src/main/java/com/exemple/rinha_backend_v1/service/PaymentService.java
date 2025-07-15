@@ -208,7 +208,7 @@ public class PaymentService {
     }
 
 
-    public Processor getSummary(Instant from, Instant to) {
+    public Processor getSummary(String from, String to) {
         try {
             Processor summary = new Processor();
 
