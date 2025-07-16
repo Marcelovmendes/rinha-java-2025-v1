@@ -31,6 +31,7 @@ public class PaymentService {
     private static final String COUNTER_REQUESTS = "counter:requests:";
     private static final String COUNTER_AMOUNT = "counter:amount:";
     private static final String COUNTER_FEE = "counter:fee:";
+    private static final String PAYMENTS_LOG = "payments:log";
 
     private final RedissonClient redisson;
     private final RestTemplate restTemplate;
@@ -186,62 +187,79 @@ public class PaymentService {
     }
     private void updateSummary(ProcessorType processor, PaymentQueueItem item) {
         try {
-            BigDecimal amount = item.amount();
 
-            RAtomicLong totalRequests = redisson.getAtomicLong(COUNTER_REQUESTS + processor.getName());
-            RAtomicDouble totalAmount = redisson.getAtomicDouble(COUNTER_AMOUNT + processor.getName());
+            RScoredSortedSet<String> paymentsLog = redisson.getScoredSortedSet(PAYMENTS_LOG);
 
-            long newRequestCount = totalRequests.incrementAndGet();
-            double newAmountTotal = totalAmount.addAndGet(item.amount().doubleValue());
+            String logEntry = String.format("%s|%s|%s",
+                    processor.getName(),
+                    item.amount().toString(),
+                    item.correlationId().toString()
+            );
 
+            double score = item.requestedAt().toEpochMilli();
+            paymentsLog.add(score, logEntry);
 
-            log.info("Updated summary for {}: requests={}, totalAmount={}, payment={}",
-                    processor.getName(), newRequestCount, newAmountTotal, item.amount());
+            log.debug("Stored payment log: {} with timestamp {}", logEntry, item.requestedAt());
 
+            if (paymentsLog.size() > 10000) {
+                paymentsLog.removeRangeByRank(0, 1000);
+            }
 
         } catch (Exception e) {
-            log.error("Error updating summary for {}: {}", processor.getName(), e.getMessage());
+            log.error("Error storing payment log: {}", e.getMessage());
         }
     }
 
 
     public Processor getSummary(String from, String to) {
         try {
+            Instant fromInstant = from != null ? Instant.parse(from) : Instant.EPOCH;
+            Instant toInstant = to != null ? Instant.parse(to) : Instant.now();
+
+            log.info("Getting summary from {} to {}", fromInstant, toInstant);
+
             Processor summary = new Processor();
-
-            RAtomicLong defaultRequests = redisson.getAtomicLong(COUNTER_REQUESTS + ProcessorType.DEFAULT.getName());
-            RAtomicDouble defaultAmount = redisson.getAtomicDouble(COUNTER_AMOUNT + ProcessorType.DEFAULT.getName());
-
             Processor.Summary defaultSummary = new Processor.Summary();
-            long defaultReq = defaultRequests.get();
-            double defaultAmt = defaultAmount.get();;
-
-            defaultSummary.setTotalRequests(defaultReq);
-            defaultSummary.computeTotalAmount(BigDecimal.valueOf(defaultAmt).setScale(2, RoundingMode.HALF_UP));
-
-            RAtomicLong fallbackRequests = redisson.getAtomicLong(COUNTER_REQUESTS + ProcessorType.FALLBACK.getName());
-            RAtomicDouble fallbackAmount = redisson.getAtomicDouble(COUNTER_AMOUNT + ProcessorType.FALLBACK.getName());
-
             Processor.Summary fallbackSummary = new Processor.Summary();
-            long fallbackReq = fallbackRequests.get();
-            double fallbackAmt = fallbackAmount.get();
 
-            fallbackSummary.setTotalRequests(fallbackReq);
-            fallbackSummary.computeTotalAmount(BigDecimal.valueOf(fallbackAmt).setScale(2, RoundingMode.HALF_UP));
+            RScoredSortedSet<String> paymentsLog = redisson.getScoredSortedSet(PAYMENTS_LOG);
+
+            var entries = paymentsLog.entryRange(
+                    fromInstant.toEpochMilli(),
+                    true,
+                    toInstant.toEpochMilli(),
+                    true
+            );
+
+            for (var entry : entries) {
+                String[] parts = entry.getValue().split("\\|");
+                if (parts.length >= 3) {
+                    String processorName = parts[0];
+                    BigDecimal amount = new BigDecimal(parts[1]);
+
+                    if (processorName.equals(ProcessorType.DEFAULT.getName())) {
+                        defaultSummary.setTotalRequests(defaultSummary.getTotalRequests() + 1);
+                        defaultSummary.computeTotalAmount(amount);
+                    }
+                    if (processorName.equals(ProcessorType.FALLBACK.getName())) {
+                        fallbackSummary.setTotalRequests(fallbackSummary.getTotalRequests() + 1);
+                        fallbackSummary.computeTotalAmount(amount);
+                    }
+                }
+            }
 
             summary.defaultProcessor(defaultSummary);
             summary.fallbackProcessor(fallbackSummary);
-            log.debug("Summary generated - Default: {} req, {} amt | Fallback: {} req, {} amt",
-                    defaultReq, defaultAmt, fallbackReq, fallbackAmt);
+
+            log.info("Summary result - Default: {} requests, {} amount | Fallback: {} requests, {} amount",
+                    defaultSummary.getTotalRequests(), defaultSummary.getTotalAmount(),
+                    fallbackSummary.getTotalRequests(), fallbackSummary.getTotalAmount());
 
             return summary;
 
         } catch (Exception e) {
-            log.error("Error generating fast summary: {}", e.getMessage());
-            Processor summary = new Processor();
-            summary.defaultProcessor(new Processor.Summary());
-            summary.fallbackProcessor(new Processor.Summary());
-            return summary;
+            log.error("Error generating summary: {}", e.getMessage(), e);
+            return new Processor();
         }
     }
 
