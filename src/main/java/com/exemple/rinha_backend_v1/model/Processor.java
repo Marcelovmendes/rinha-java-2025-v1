@@ -18,10 +18,8 @@ public class Processor {
     }
 
     public static class Summary {
-        @JsonProperty("total_requests")
-        private long totalRequests;
 
-        @JsonProperty("total_amount")
+        private long totalRequests;
         private BigDecimal totalAmount;
 
 
@@ -40,7 +38,7 @@ public class Processor {
         }
         public void computeTotalAmount(BigDecimal amount) {
             if (amount != null) {
-                this.totalAmount = this.totalAmount.add(amount);
+                this.totalAmount = (this.totalAmount == null) ? amount : this.totalAmount.add(amount);
             }
         }
 

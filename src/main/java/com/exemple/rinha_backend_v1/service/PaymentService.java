@@ -34,7 +34,6 @@ public class PaymentService {
 
     private final RedissonClient redisson;
     private final RestTemplate restTemplate;
-    private final RBucket<Processor> summaryCache;
 
     @Value("${PAYMENT_PROCESSOR_URL_DEFAULT:http://payment-processor-default:8080}")
     private String defaultProcessorUrl;
@@ -45,7 +44,6 @@ public class PaymentService {
     public PaymentService(RedissonClient redisson) {
         this.redisson = redisson;
         this.restTemplate = new RestTemplate();
-        this.summaryCache = redisson.getBucket("summary:cache");
         startPaymentProcessor();
     }
 
@@ -59,7 +57,7 @@ public class PaymentService {
                 return;
             }
 
-            if (processedIds.size() > 5000) {
+            if (processedIds.size() > 10000) {
                 processedIds.remove(processedIds.iterator().next());
             }
 
@@ -70,7 +68,7 @@ public class PaymentService {
                     Instant.now()
             );
 
-           Boolean added = queue.offer(item);
+           boolean added = queue.offer(item);
 
            if (!added) {
                 log.error("Failed to add payment to queue: {}", request.getCorrelationId());
@@ -200,7 +198,6 @@ public class PaymentService {
             log.info("Updated summary for {}: requests={}, totalAmount={}, payment={}",
                     processor.getName(), newRequestCount, newAmountTotal, item.amount());
 
-            summaryCache.delete();
 
         } catch (Exception e) {
             log.error("Error updating summary for {}: {}", processor.getName(), e.getMessage());
@@ -214,32 +211,28 @@ public class PaymentService {
 
             RAtomicLong defaultRequests = redisson.getAtomicLong(COUNTER_REQUESTS + ProcessorType.DEFAULT.getName());
             RAtomicDouble defaultAmount = redisson.getAtomicDouble(COUNTER_AMOUNT + ProcessorType.DEFAULT.getName());
-            RAtomicDouble defaultFee = redisson.getAtomicDouble(COUNTER_FEE + ProcessorType.DEFAULT.getName());
 
             Processor.Summary defaultSummary = new Processor.Summary();
             long defaultReq = defaultRequests.get();
-            double defaultAmt = defaultAmount.get();
-            double defaultFeeAmt = defaultFee.get();
+            double defaultAmt = defaultAmount.get();;
 
             defaultSummary.setTotalRequests(defaultReq);
             defaultSummary.computeTotalAmount(BigDecimal.valueOf(defaultAmt).setScale(2, RoundingMode.HALF_UP));
 
             RAtomicLong fallbackRequests = redisson.getAtomicLong(COUNTER_REQUESTS + ProcessorType.FALLBACK.getName());
             RAtomicDouble fallbackAmount = redisson.getAtomicDouble(COUNTER_AMOUNT + ProcessorType.FALLBACK.getName());
-            RAtomicDouble fallbackFee = redisson.getAtomicDouble(COUNTER_FEE + ProcessorType.FALLBACK.getName());
 
             Processor.Summary fallbackSummary = new Processor.Summary();
             long fallbackReq = fallbackRequests.get();
             double fallbackAmt = fallbackAmount.get();
-            double fallbackFeeAmt = fallbackFee.get();
 
             fallbackSummary.setTotalRequests(fallbackReq);
             fallbackSummary.computeTotalAmount(BigDecimal.valueOf(fallbackAmt).setScale(2, RoundingMode.HALF_UP));
 
             summary.defaultProcessor(defaultSummary);
             summary.fallbackProcessor(fallbackSummary);
-            log.debug("Summary generated - Default: {} req, {} amt, {} fee | Fallback: {} req, {} amt",
-                    defaultReq, defaultAmt, defaultFeeAmt, fallbackReq, fallbackAmt);
+            log.debug("Summary generated - Default: {} req, {} amt | Fallback: {} req, {} amt",
+                    defaultReq, defaultAmt, fallbackReq, fallbackAmt);
 
             return summary;
 
